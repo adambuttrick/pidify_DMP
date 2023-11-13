@@ -1,0 +1,16 @@
+beautifulsoup4==4.12.2
+certifi==2023.7.22
+cffi==1.16.0
+charset-normalizer==3.3.2
+cryptography==41.0.5
+idna==3.4
+lxml==4.9.3
+pdfminer==20191125
+pdfminer.six==20221105
+pycparser==2.21
+pycryptodome==3.19.0
+rapidfuzz==3.5.2
+requests==2.31.0
+soupsieve==2.5
+thefuzz==0.20.0
+urllib3==2.0.7
