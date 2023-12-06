@@ -43,12 +43,20 @@ def extract_dates(text):
 
 
 def extract_creator(text):
-    match = re.search(r'Creator:\s+([^\n]+)', text)
-    return match.group(1).strip() if match else None
+    if 'ORCID' in text:
+        orcid_present = True
+        match = re.search(r'Creator:\s+([^\n]+?)(?:\s+-\s+ORCID:|$)', text)
+    else:
+        match = re.search(r'Creator:\s+([^\n]+)', text)
+        orcid_present = False
+    return (match.group(1).strip(), orcid_present) if match else (None, orcid_present)
 
 
-def is_orcid_present(creator):
-    return "ORCID" in creator
+def extract_orcid(text):
+    pattern = r'0000-000(1-[5-9]|2-[0-9]|3-[0-4])\d{3}-\d{3}[\dX]'
+    match = re.search(pattern, text)
+    return match.group(0).strip() if match else None
+
 
 
 def extract_affiliation(text):
@@ -68,13 +76,9 @@ def search_orcid(creator_name, affiliation):
             soup = BeautifulSoup(response.text, 'xml')
             expanded_search = soup.find('expanded-search:expanded-search')
             if expanded_search and expanded_search['num-found'] != '0':
-                orcid_urls = []
+                orcid_ids = []
                 orcid_id_tags = soup.find_all('expanded-search:orcid-id')
-                for tag in orcid_id_tags:
-                    orcid_id = tag.text.strip()
-                    orcid_url = f"https://orcid.org/{orcid_id}"
-                    orcid_urls.append(orcid_url)
-                return orcid_urls
+                return orcid_id_tags[0].text.strip()
             else:
                 return None
         else:
@@ -108,7 +112,7 @@ def extract_funder(text):
 
 def extract_funding_opportunity_number(text):
     match = re.search(r'Funding opportunity number:\s+([^\n]+)', text)
-    return match.group(1).strip() if match else None
+    return [match.group(1).strip()] if match else None
 
 
 def search_ror(organization_name):
@@ -183,7 +187,7 @@ def get_award_works(award_number):
         return {}
 
 
-def compile_results_to_json(dmp_id, start_date, end_date, last_modified, orcid_results, creator, affiliation, ror_id_affiliation, funder_name, funder_id, ror_id_funder, funder_id_from_ror, funding_opportunity_number, crossref_info, author_works):
+def compile_results_to_json(dmp_id, start_date, end_date, last_modified, orcid_id, creator, affiliation, ror_id_affiliation, funder_name, funder_id, ror_id_funder, funder_id_from_ror, funding_opportunity_number, crossref_info, author_works):
     results = {
         "inputs": {
             "dmp_id": dmp_id,
@@ -200,7 +204,7 @@ def compile_results_to_json(dmp_id, start_date, end_date, last_modified, orcid_r
             },
             "creator_orcid": {
                 "input": [creator, affiliation],
-                "orcid": orcid_results
+                "orcid": orcid_id
             },
             "affiliation": {
                 "input": affiliation,
@@ -217,7 +221,7 @@ def compile_results_to_json(dmp_id, start_date, end_date, last_modified, orcid_r
                 "crossref_award_works": crossref_info
             },
             "author_works": {
-                "inputs": {"orcid_results": orcid_results[0], "start_date": start_date},
+                "inputs": {"orcid_id": orcid_id, "start_date": start_date},
                 "dois": author_works
             }
         }
@@ -238,23 +242,26 @@ def main():
     extracted_text = extract_text_from_pdf(args.input_pdf)
     dmp_id = extract_dmp_id(extracted_text)
     start_date, end_date, last_modified = extract_dates(extracted_text)
-    creator = extract_creator(extracted_text)
+    creator, orcid_present = extract_creator(extracted_text)
     affiliation = extract_affiliation(extracted_text)
     funder_name = extract_funder(extracted_text)
-    funding_opportunity_number = extract_funding_opportunity_number(extracted_text)
-    orcid_results = None
-    if not is_orcid_present(creator):
-        orcid_results = search_orcid(creator, affiliation)
+    funding_opportunity_number = extract_funding_opportunity_number(
+        extracted_text)
+    if orcid_present:
+        orcid_id = extract_orcid(extracted_text)
+    else:
+        orcid_id = search_orcid(creator, affiliation)
     ror_id_affiliation = search_ror(affiliation)
     ror_id_funder, funder_id_from_ror = search_ror_for_funder(funder_name)
     funder_id = search_funder_registry(funder_name)
     crossref_info = get_award_works(funding_opportunity_number)
-    if orcid_results:
-        author_works = search_openalex_works(orcid_results[0], start_date.split('-')[0]) if orcid_results else []
+    if orcid_id and start_date:
+        author_works = search_openalex_works(
+            orcid_id, start_date.split('-')[0]) if orcid_id else []
     else:
         author_works = None
     json_result = compile_results_to_json(
-        dmp_id, start_date, end_date, last_modified, orcid_results, creator, affiliation, ror_id_affiliation, funder_name, funder_id, ror_id_funder, funder_id_from_ror, funding_opportunity_number, crossref_info, author_works)
+        dmp_id, start_date, end_date, last_modified, orcid_id, creator, affiliation, ror_id_affiliation, funder_name, funder_id, ror_id_funder, funder_id_from_ror, funding_opportunity_number, crossref_info, author_works)
     print(json_result)
 
 
