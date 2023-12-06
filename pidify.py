@@ -5,6 +5,7 @@ import requests
 import argparse
 from thefuzz import fuzz
 from bs4 import BeautifulSoup
+from dateutil.parser import parse
 from pdfminer.high_level import extract_text
 
 
@@ -20,6 +21,27 @@ def extract_dmp_id(text):
     return match.group(1).strip() if match else None
 
 
+def convert_to_iso(date_str):
+    try:
+        return parse(date_str).date().isoformat()
+    except ValueError:
+        return None
+
+
+def extract_dates(text):
+    fields = {
+        'Start date': r'Start date:\s+([^\n]+)',
+        'End date': r'End date:\s+([^\n]+)',
+        'Last modified': r'Last modified:\s+([^\n]+)'
+    }
+    results = []
+    for field, pattern in fields.items():
+        match = re.search(pattern, text)
+        results.append(convert_to_iso(
+            match.group(1).strip()) if match else None)
+    return tuple(results)
+
+
 def extract_creator(text):
     match = re.search(r'Creator:\s+([^\n]+)', text)
     return match.group(1).strip() if match else None
@@ -32,27 +54,6 @@ def is_orcid_present(creator):
 def extract_affiliation(text):
     match = re.search(r'Affiliation:\s+([^\(]+)', text)
     return match.group(1).strip() if match else None
-
-
-def search_orcid(creator_name, affiliation):
-    print(creator_name, affiliation)
-    orcid_api_url = "https://pub.orcid.org/v3.0/search/"
-    headers = {"Accept": "application/json"}
-    params = {
-        "q": f'name:"{creator_name}" AND employment-org-name:"{affiliation}"'
-    }
-    try:
-        response = requests.get(orcid_api_url, headers=headers, params=params)
-        print(response.url)
-        if response.status_code == 200:
-            data = response.json()
-            return [result["orcid-identifier"]["path"] for result in data["result"]]
-        else:
-            logging.error(f'Error searching ORCID for: {creator_name} - Status Code: {response.status_code}, Response: {response.text}')
-            return []
-    except Exception as e:
-        logging.error(f'Exception while searching ORCID for: {creator_name} - {e}')
-        return []
 
 
 def search_orcid(creator_name, affiliation):
@@ -81,6 +82,22 @@ def search_orcid(creator_name, affiliation):
             return None
     except Exception as e:
         logging.error(f'Exception while searching ORCID for: {creator_name} - {e}')
+        return None
+
+
+def search_openalex_works(orcid_id, start_year):
+    try:
+        openalex_api_url = "https://api.openalex.org/works"
+        params = {
+            'filter': f'authorships.author.orcid:{orcid_id},publication_year:{start_year}-'
+        }
+        response = requests.get(openalex_api_url, params=params)
+        if response.status_code == 200:
+            works = response.json().get('results', [])
+            return [work.get('doi') for work in works if work.get('doi')]
+        else:
+            return None
+    except Exception as e:
         return None
 
 
@@ -140,9 +157,9 @@ def search_funder_registry(org_name):
     params = {'query': org_name}
     api_response = requests.get(url, params=params).json()
     for item in api_response['message']['items']:
-        match_ratio = fuzz.token_set_ratio(
+        match_ratio = fuzz.token_sort_ratio(
             org_name, normalize_text(item['name']))
-        if match_ratio > 90:
+        if match_ratio > 95:
             return item['id']
         elif org_name in item['alt-names']:
             return item['id']
@@ -166,10 +183,13 @@ def get_award_works(award_number):
         return {}
 
 
-def compile_results_to_json(dmp_id, orcid_results, creator, affiliation, ror_id_affiliation, funder_name, funder_id, ror_id_funder, funder_id_from_ror, funding_opportunity_number, crossref_info):
+def compile_results_to_json(dmp_id, start_date, end_date, last_modified, orcid_results, creator, affiliation, ror_id_affiliation, funder_name, funder_id, ror_id_funder, funder_id_from_ror, funding_opportunity_number, crossref_info, author_works):
     results = {
         "inputs": {
             "dmp_id": dmp_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "last_modified": last_modified,
             "affiliation": affiliation,
             "funder_name": funder_name,
             "funding_opportunity_number": funding_opportunity_number
@@ -195,6 +215,10 @@ def compile_results_to_json(dmp_id, orcid_results, creator, affiliation, ror_id_
             "funding_opportunity_number": {
                 "input": funding_opportunity_number,
                 "crossref_award_works": crossref_info
+            },
+            "author_works": {
+                "inputs": {"orcid_results": orcid_results[0], "start_date": start_date},
+                "dois": author_works
             }
         }
     }
@@ -213,11 +237,11 @@ def main():
     args = parse_arguments()
     extracted_text = extract_text_from_pdf(args.input_pdf)
     dmp_id = extract_dmp_id(extracted_text)
+    start_date, end_date, last_modified = extract_dates(extracted_text)
     creator = extract_creator(extracted_text)
     affiliation = extract_affiliation(extracted_text)
     funder_name = extract_funder(extracted_text)
-    funding_opportunity_number = extract_funding_opportunity_number(
-        extracted_text)
+    funding_opportunity_number = extract_funding_opportunity_number(extracted_text)
     orcid_results = None
     if not is_orcid_present(creator):
         orcid_results = search_orcid(creator, affiliation)
@@ -225,8 +249,12 @@ def main():
     ror_id_funder, funder_id_from_ror = search_ror_for_funder(funder_name)
     funder_id = search_funder_registry(funder_name)
     crossref_info = get_award_works(funding_opportunity_number)
+    if orcid_results:
+        author_works = search_openalex_works(orcid_results[0], start_date.split('-')[0]) if orcid_results else []
+    else:
+        author_works = None
     json_result = compile_results_to_json(
-        dmp_id, orcid_results, creator, affiliation, ror_id_affiliation, funder_name, funder_id, ror_id_funder, funder_id_from_ror, funding_opportunity_number, crossref_info)
+        dmp_id, start_date, end_date, last_modified, orcid_results, creator, affiliation, ror_id_affiliation, funder_name, funder_id, ror_id_funder, funder_id_from_ror, funding_opportunity_number, crossref_info, author_works)
     print(json_result)
 
 
